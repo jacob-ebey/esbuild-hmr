@@ -157,8 +157,6 @@ const esbuildContext = await esbuild.context({
               window.$RefreshReg$ = prevRefreshReg;
               window.$RefreshSig$ = prevRefreshSig;
               import.meta.hot.accept(({ module }) => {
-                router.routes[id].links = module.links
-                console.log({module, runtime: window.$RefreshRuntime$})
                 window.$RefreshRuntime$.performReactRefresh();
               });
             `;

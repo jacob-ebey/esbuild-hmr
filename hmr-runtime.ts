@@ -18,20 +18,23 @@ if (!window.__hmr__) {
       case "hmr":
         if (!payload.updates?.length) return;
 
+        let anyAccepted = false;
         for (const update of payload.updates) {
           if (window.__hmr__.contexts[update.id]) {
-            if (
-              window.__hmr__.contexts[update.id].emit(
-                await import(update.url + "?t=" + Date.now())
-              )
-            ) {
+            const accepted = window.__hmr__.contexts[update.id].emit(
+              await import(update.url + "?t=" + Date.now())
+            );
+            if (accepted) {
               console.log("[HMR] Updated accepted by", update.id);
-              return;
+              anyAccepted = true;
             }
           }
         }
-        console.log("[HMR] Updated rejected, reloading...");
-        window.location.reload();
+
+        if (!anyAccepted) {
+          console.log("[HMR] Updated rejected, reloading...");
+          window.location.reload();
+        }
         break;
     }
   });
@@ -56,6 +59,10 @@ export function createHotContext(id: string): ImportMetaHot {
       callback = undefined;
     },
     emit(self: ModuleNamespace) {
+      if (disposed) {
+        throw new Error("import.meta.hot.emit() called after dispose()");
+      }
+
       if (callback) {
         callback(self);
         return true;
@@ -64,6 +71,10 @@ export function createHotContext(id: string): ImportMetaHot {
     },
   };
 
+  if (window.__hmr__.contexts[id]) {
+    window.__hmr__.contexts[id].dispose();
+    window.__hmr__.contexts[id] = undefined;
+  }
   window.__hmr__.contexts[id] = hot;
 
   return hot;

@@ -10,9 +10,16 @@ import expressWebSocket from "express-ws";
  * @param {esbuild.BuildResult} build
  */
 function writeIndexHtml(build) {
-  const [entry] = Object.entries(build.metafile.outputs).find(
-    ([_, output]) => output.inputs["app/entry.client.ts"]
+  let [entry] = Object.entries(build.metafile.outputs).find(
+    ([_, output]) => output.inputs["app/entry.client.tsx"]
   );
+  let [hmrEntry] = Object.entries(build.metafile.outputs).find(
+    ([_, output]) => output.inputs["hmr-entrypoint.ts"]
+  );
+
+  entry = JSON.stringify("/" + entry.replace(/^public\//, ""));
+  hmrEntry = JSON.stringify("/" + hmrEntry.replace(/^public\//, ""));
+
   fs.writeFileSync(
     "public/index.html",
     `<!DOCTYPE html>
@@ -25,13 +32,12 @@ function writeIndexHtml(build) {
   </head>
   <body>
     <h1>ESBuild HMR</h1>
-    <p id="message"></p>
+    <div id="app"></div>
+    <script type="module" src=${hmrEntry}></script>
     <script type="module">
-      import * as entry from ${JSON.stringify(
-        "/" + entry.replace(/^public\//, "")
-      )};
+      import * as entry from ${entry};
 
-      entry.sayHello();
+      entry.run();
     </script>
   </body>
 </html>
@@ -45,10 +51,15 @@ const esbuildContext = await esbuild.context({
   chunkNames: "[name]-[hash]",
   entryNames: "[name]-[hash]",
   entryPoints: {
-    bundle: "app/entry.client.ts",
+    bundle: "app/entry.client.tsx",
+    hmr: "hmr-entrypoint.ts",
+    react: "react",
+    "react-dom": "react-dom",
+    "react-refresh/runtime": "react-refresh/runtime",
   },
   format: "esm",
   logLevel: "warning",
+  jsx: "automatic",
   metafile: true,
   outdir: "public/build",
   platform: "browser",
@@ -80,26 +91,81 @@ const esbuildContext = await esbuild.context({
     },
     {
       name: "hmr",
-      setup(build) {
+      async setup(build) {
+        const babel = await import("@babel/core");
+        const reactRefresh = await import("react-refresh/babel");
+
+        const IS_FAST_REFRESH_ENABLED = /\$RefreshReg\$\(/;
+
+        const appDir = path.join(process.cwd(), "app");
+
         build.onLoad({ filter: /.*/, namespace: "file" }, (args) => {
-          if (!args.path.match(/\.[tj]sx?$/) || !fs.existsSync(args.path)) {
+          if (
+            !args.path.match(/\.[tj]sx?$/) ||
+            !fs.existsSync(args.path) ||
+            !args.path.startsWith(appDir)
+          ) {
             return undefined;
           }
 
+          const hmrId = JSON.stringify(path.relative(process.cwd(), args.path));
           const hmrPrefix = fs
             .readFileSync("hmr-prefix.ts", "utf8")
             .replace(
               `import * as __hmr__ from "./hmr-runtime";`,
               `import * as __hmr__ from "hmr:runtime";`
             )
-            .replace(
-              /\$id\$/g,
-              JSON.stringify(path.relative(process.cwd(), args.path))
-            );
+            .replace(/\$id\$/g, hmrId);
           const sourceCode = fs.readFileSync(args.path, "utf8");
 
+          const sourceCodeWithHMR = hmrPrefix + sourceCode;
+
+          const jsWithHMR = esbuild.transformSync(sourceCodeWithHMR, {
+            loader: args.path.endsWith("x") ? "tsx" : "ts",
+            format: args.pluginData?.format || "esm",
+          }).code;
+          let resultCode = jsWithHMR;
+
+          const jsWithReactRefresh = babel.transformSync(jsWithHMR, {
+            filename: args.path,
+            ast: false,
+            compact: false,
+            sourceMaps: build.initialOptions.sourcemap ? "inline" : false,
+            configFile: false,
+            babelrc: false,
+            plugins: [[reactRefresh.default, { skipEnvCheck: true }]],
+          }).code;
+
+          if (IS_FAST_REFRESH_ENABLED.test(jsWithReactRefresh)) {
+            resultCode =
+              `
+              if (!window.$RefreshReg$ || !window.$RefreshSig$ || !window.$RefreshRuntime$) {
+                console.warn('@remix-run/react-refresh: HTML setup script not run. React Fast Refresh only works when Remix serves your HTML routes. You may want to remove this plugin.');
+              } else {
+                var prevRefreshReg = window.$RefreshReg$;
+                var prevRefreshSig = window.$RefreshSig$;
+                window.$RefreshReg$ = (type, id) => {
+                  window.$RefreshRuntime$.register(type, ${JSON.stringify(
+                    hmrId
+                  )} + id);
+                }
+                window.$RefreshSig$ = window.$RefreshRuntime$.createSignatureFunctionForTransform;
+              }
+            ` +
+              jsWithReactRefresh +
+              `
+              window.$RefreshReg$ = prevRefreshReg;
+              window.$RefreshSig$ = prevRefreshSig;
+              import.meta.hot.accept(({ module }) => {
+                router.routes[id].links = module.links
+                console.log({module, runtime: window.$RefreshRuntime$})
+                window.$RefreshRuntime$.performReactRefresh();
+              });
+            `;
+          }
+
           return {
-            contents: hmrPrefix + sourceCode,
+            contents: resultCode,
             loader: args.path.endsWith("x") ? "tsx" : "ts",
             resolveDir: path.dirname(args.path),
           };

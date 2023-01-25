@@ -4,6 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "Node",
     "allowSyntheticDefaultImports": true,
-    "checkJs": true
+    "checkJs": true,
+    "jsx": "react-jsx"
   }
 }
